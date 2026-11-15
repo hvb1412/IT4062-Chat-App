@@ -2,7 +2,6 @@
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
-
 #include <arpa/inet.h>
 #include <errno.h>
 #include <stddef.h>
@@ -12,13 +11,12 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+/* Khai báo hàm. */
 int parse_port(const char *text, unsigned short *port);
 int send_all(int fd, const char *data, size_t length);
 static int open_connection(int argc, char **argv);
-int main(int argc, char **argv);
+static int send_test_message(int fd);
 
-
-/* Chỉ chấp nhận cổng có chữ số và nằm trong khoảng 1–65535. */
 int parse_port(const char *text, unsigned short *port)
 {
     if (!*text)
@@ -50,8 +48,6 @@ int send_all(int fd, const char *data, size_t length)
     return 0;
 }
 
-
-/* Kết nối bằng IPv4/cổng được truyền từ dòng lệnh. */
 static int open_connection(int argc, char **argv)
 {
     unsigned short port;
@@ -74,11 +70,24 @@ static int open_connection(int argc, char **argv)
     return fd;
 }
 
+/* Gửi thông điệp cố định, đóng chiều gửi và đọc hết phản hồi. */
+static int send_test_message(int fd)
+{
+    const char message[] = "hello from client\n";
+    if (send_all(fd, message, sizeof(message) - 1) < 0 || shutdown(fd, SHUT_WR) < 0)
+        return EXIT_FAILURE;
+    char buffer[1024];
+    ssize_t count;
+    while ((count = recv(fd, buffer, sizeof(buffer), 0)) > 0) { }
+    return count < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
+}
+
+/* main chỉ điều phối kết nối, trao đổi và giải phóng socket. */
 int main(int argc, char **argv)
 {
     int fd = open_connection(argc, argv);
     if (fd < 0) return EXIT_FAILURE;
-    puts("Ket noi thanh cong");
+    int status = send_test_message(fd);
     close(fd);
-    return EXIT_SUCCESS;
+    return status;
 }
