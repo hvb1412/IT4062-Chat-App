@@ -18,9 +18,13 @@ build/
 obj/
 
 server/server
+server
+client
 client/client
 /server_app
+server_app
 /client_app
+client_app
 
 # File loi / debug
 core
