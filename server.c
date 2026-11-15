@@ -44,6 +44,28 @@ int main() {
 
   printf("Client connected!\n");
 
+  char buffer[10240];
+
+  ssize_t bytes_received = recv(client_socket, buffer, sizeof(buffer) - 1, 0);
+
+  if(bytes_received < 0) {
+    perror("recv");
+  } else if(bytes_received == 0) {
+    printf("Client disconnected!\n");
+  } else {
+    buffer[bytes_received] = '\0';
+
+    printf("Received: %s\n", buffer);
+
+    ssize_t bytes_sent = send(client_socket, buffer, bytes_received, 0);
+
+    if(bytes_sent < 0) {
+      perror("send");
+    } else {
+      printf("Sent: %zd bytes\n", bytes_sent);
+    }
+  }
+
   close(client_socket);
   close(listener);
 
