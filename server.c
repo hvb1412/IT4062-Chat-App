@@ -34,39 +34,37 @@ int main() {
 
   printf("Server is listening on port 8080...\n");
 
-  int client_socket = accept(listener, NULL, NULL);
+  while(1) {
+    int client_socket = accept(listener, NULL, NULL);
 
-  if(client_socket < 0) {
-    perror("accept");
-    close(listener);
-    return EXIT_FAILURE;
-  }
-
-  printf("Client connected!\n");
-
-  char buffer[10240];
-
-  ssize_t bytes_received = recv(client_socket, buffer, sizeof(buffer) - 1, 0);
-
-  if(bytes_received < 0) {
-    perror("recv");
-  } else if(bytes_received == 0) {
-    printf("Client disconnected!\n");
-  } else {
-    buffer[bytes_received] = '\0';
-
-    printf("Received: %s\n", buffer);
-
-    ssize_t bytes_sent = send(client_socket, buffer, bytes_received, 0);
-
-    if(bytes_sent < 0) {
-      perror("send");
-    } else {
-      printf("Sent: %zd bytes\n", bytes_sent);
+    if(client_socket < 0) {
+      perror("accept");
+      continue;
     }
+
+    printf("Client connected!\n");
+
+    while(1) {
+      char buffer[10240];
+
+      ssize_t bytes_received = recv(client_socket, buffer, sizeof(buffer), 0);
+
+      if(bytes_received <= 0) {
+        break;
+      }
+
+      ssize_t bytes_sent = send(client_socket, buffer, bytes_received, 0);
+
+      if(bytes_sent < 0) {
+        perror("send");
+        break;
+      }
+    }
+
+    printf("Client disconnected!\n");
+    close(client_socket);
   }
 
-  close(client_socket);
   close(listener);
 
   return EXIT_SUCCESS;
