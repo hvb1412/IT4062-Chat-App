@@ -14,8 +14,7 @@
 int parse_port(const char *text, unsigned short *port);
 int send_all(int fd, const char *data, size_t length);
 static int open_connection(int argc, char **argv);
-static int send_user_line(int fd);
-static int display_echo(int fd);
+static int run_chat_loop(int fd);
 
 int parse_port(const char *text, unsigned short *port)
 {
@@ -70,32 +69,42 @@ static int open_connection(int argc, char **argv)
     return fd;
 }
 
-static int send_user_line(int fd)
+/* Theo dõi đồng thời bàn phím và socket cho đến khi kết thúc trao đổi. */
+static int run_chat_loop(int fd)
 {
-    char buffer[1024];
-    if (fgets(buffer, sizeof(buffer), stdin)) {
-        size_t length = 0;
-        while (buffer[length]) ++length;
-        if (send_all(fd, buffer, length) < 0) return EXIT_FAILURE;
+    int input_done = 0;
+    while (1) {
+        fd_set reads;
+        FD_ZERO(&reads);
+        FD_SET(fd, &reads);
+        if (!input_done) FD_SET(STDIN_FILENO, &reads);
+        if (select(fd + 1, &reads, NULL, NULL, NULL) < 0) break;
+        if (FD_ISSET(fd, &reads)) {
+            char buffer[1024];
+            ssize_t count = recv(fd, buffer, sizeof(buffer), 0);
+            if (count <= 0) break;
+            fwrite(buffer, 1, (size_t)count, stdout);
+            fflush(stdout);
+        }
+        if (!input_done && FD_ISSET(STDIN_FILENO, &reads)) {
+            char buffer[1024];
+            ssize_t count = read(STDIN_FILENO, buffer, sizeof(buffer));
+            if (count <= 0) {
+                input_done = 1;
+                if (shutdown(fd, SHUT_WR) < 0) break;
+            } else if (send_all(fd, buffer, (size_t)count) < 0) break;
+        }
     }
-    return shutdown(fd, SHUT_WR) < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
+    return EXIT_SUCCESS;
 }
 
-static int display_echo(int fd)
-{
-    char buffer[1024];
-    ssize_t count;
-    while ((count = recv(fd, buffer, sizeof(buffer), 0)) > 0)
-        fwrite(buffer, 1, (size_t)count, stdout);
-    return count < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
-}
-
+/* main chỉ điều phối kết nối, trao đổi và giải phóng socket. */
 int main(int argc, char **argv)
 {
     int fd = open_connection(argc, argv);
     if (fd < 0) return EXIT_FAILURE;
-    int status = send_user_line(fd);
-    if (status == EXIT_SUCCESS) status = display_echo(fd);
+    if (fd >= FD_SETSIZE) { close(fd); return EXIT_FAILURE; }
+    int status = run_chat_loop(fd);
     close(fd);
     return status;
 }
