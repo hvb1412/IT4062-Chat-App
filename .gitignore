@@ -1,0 +1,72 @@
+#  IT4062 - Ung dung Chat (C, socket TCP)
+
+*.o
+*.obj
+*.a
+*.so
+*.so.*
+*.dylib
+*.exe
+*.out
+a.out
+*.gch
+*.pch
+
+# Thu muc dau ra cua Makefile
+bin/
+build/
+obj/
+
+server/server
+client/client
+/server_app
+/client_app
+
+# File loi / debug
+core
+core.*
+vgcore.*
+*.dSYM/
+*.su
+callgrind.out.*
+
+# Du lieu sinh ra khi chay thu
+data/*
+!data/.gitkeep
+logs/*
+!logs/.gitkeep
+*.log
+*.db
+*.sqlite
+
+# File tam khi test
+out.txt
+list.txt
+tmp/
+
+*.pptx
+~$*
+docs/ref/
+
+# Rac cua he dieu hanh
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+desktop.ini
+
+# Trinh soan thao
+*.swp
+*.swo
+*~
+.idea/
+
+# VS Code: chi giu cac file cau hinh dung chung
+.vscode/*
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+README.md
