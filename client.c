@@ -14,8 +14,9 @@
 int parse_port(const char *text, unsigned short *port);
 int send_all(int fd, const char *data, size_t length);
 static int open_connection(int argc, char **argv);
-static int send_user_line(int fd);
-static int display_echo(int fd);
+static int handle_socket_input(int fd);
+static int handle_keyboard_input(int fd, int *input_done);
+static int run_chat_loop(int fd);
 
 int parse_port(const char *text, unsigned short *port)
 {
@@ -70,32 +71,58 @@ static int open_connection(int argc, char **argv)
     return fd;
 }
 
-static int send_user_line(int fd)
+static int handle_socket_input(int fd)
 {
     char buffer[1024];
-    if (fgets(buffer, sizeof(buffer), stdin)) {
-        size_t length = 0;
-        while (buffer[length]) ++length;
-        if (send_all(fd, buffer, length) < 0) return EXIT_FAILURE;
-    }
-    return shutdown(fd, SHUT_WR) < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
+    ssize_t count = recv(fd, buffer, sizeof(buffer), 0);
+    if (count < 0 && errno == EINTR) return 1;
+    if (count < 0) return -1;
+    if (count == 0) return 0;
+    fwrite(buffer, 1, (size_t)count, stdout);
+    fflush(stdout);
+    return 1;
 }
 
-static int display_echo(int fd)
+static int handle_keyboard_input(int fd, int *input_done)
 {
     char buffer[1024];
-    ssize_t count;
-    while ((count = recv(fd, buffer, sizeof(buffer), 0)) > 0)
-        fwrite(buffer, 1, (size_t)count, stdout);
-    return count < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
+    ssize_t count = read(STDIN_FILENO, buffer, sizeof(buffer));
+    if (count < 0 && errno == EINTR) return 0;
+    if (count < 0) return -1;
+    if (count == 0) {
+        *input_done = 1;
+        return shutdown(fd, SHUT_WR);
+    }
+    return send_all(fd, buffer, (size_t)count);
+}
+
+static int run_chat_loop(int fd)
+{
+    int input_done = 0;
+    while (1) {
+        fd_set reads;
+        FD_ZERO(&reads);
+        FD_SET(fd, &reads);
+        if (!input_done) FD_SET(STDIN_FILENO, &reads);
+        if (select(fd + 1, &reads, NULL, NULL, NULL) < 0) {
+            if (errno == EINTR) continue;
+            return EXIT_FAILURE;
+        }
+        if (FD_ISSET(fd, &reads)) {
+            int result = handle_socket_input(fd);
+            if (result <= 0) return result < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
+        }
+        if (!input_done && FD_ISSET(STDIN_FILENO, &reads))
+            if (handle_keyboard_input(fd, &input_done) < 0) return EXIT_FAILURE;
+    }
 }
 
 int main(int argc, char **argv)
 {
     int fd = open_connection(argc, argv);
     if (fd < 0) return EXIT_FAILURE;
-    int status = send_user_line(fd);
-    if (status == EXIT_SUCCESS) status = display_echo(fd);
+    if (fd >= FD_SETSIZE) { close(fd); return EXIT_FAILURE; }
+    int status = run_chat_loop(fd);
     close(fd);
     return status;
 }
