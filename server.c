@@ -3,9 +3,15 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/socket.h>
+#include <sys/select.h>
 #include <netinet/in.h>
 
+#define PORT 8080
+#define MAX_CLIENTS 64
+#define BUFFER_SIZE 1024
+
 int main() {
+  /* 1. Tạo socket lắng nghe */
   int listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 
   if(listener < 0) {
@@ -13,6 +19,11 @@ int main() {
     return EXIT_FAILURE;
   }
 
+  /* Cho phép bind lại cổng ngay khi vừa tắt server */
+  int reuse = 1;
+  setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+  /* 2. Gắn socket vào địa chỉ và cổng */
   struct sockaddr_in server_addr;
   memset(&server_addr, 0, sizeof(server_addr));
 
@@ -26,6 +37,7 @@ int main() {
     return EXIT_FAILURE;
   }
 
+  /* 3. Bắt đầu lắng nghe */
   if(listen(listener, 5) < 0) {
     perror("listen");
     close(listener);
@@ -34,38 +46,97 @@ int main() {
 
   printf("Server is listening on port 8080...\n");
 
-  while(1) {
-    int client_socket = accept(listener, NULL, NULL);
+  /* 4. Mảng lưu các client đang kết nối, -1 là trống */
+  int clients[MAX_CLIENTS];
+  for(int i = 0; i < MAX_CLIENTS; i++) {
+    clients[i] = -1;
+  }
 
-    if(client_socket < 0) {
-      perror("accept");
-      continue;
+  while(1) {
+    /* 5. Dựng lại tập socket cần theo dõi ở mỗi vòng lặp */
+    fd_set read_fds;
+    FD_ZERO(&read_fds);
+    FD_SET(listener, &read_fds);
+    int max_fd = listener;
+
+    for(int i = 0; i < MAX_CLIENTS; i++) {
+      if(clients[i] != -1) {
+        FD_SET(clients[i], &read_fds);
+        if(clients[i] > max_fd) {
+          max_fd = clients[i];
+        }
+      }
     }
 
-    printf("Client connected!\n");
+    /* 6. Chờ cho tới khi có socket nào đó sẵn sàng đọc */
+    int activity = select(max_fd + 1, &read_fds, NULL, NULL, NULL);
 
-    while(1) {
-      char buffer[10240];
+    if(activity < 0) {
+      perror("select");
+      break;
+    }
 
-      ssize_t bytes_received = recv(client_socket, buffer, sizeof(buffer), 0);
+    /* 7. Có client mới kết nối */
+    if(FD_ISSET(listener, &read_fds)) {
+      int client_socket = accept(listener, NULL, NULL);
+
+      if(client_socket < 0) {
+        perror("accept");
+      } else {
+        int slot = -1;
+        for(int i = 0; i < MAX_CLIENTS; i++) {
+          if(clients[i] == -1) {
+            slot = i;
+            break;
+          }
+        }
+
+        if(slot == -1) {
+          printf("Server is full, reject client %d\n", client_socket);
+          close(client_socket);
+        } else {
+          clients[slot] = client_socket;
+          printf("Client %d connected!\n", client_socket);
+        }
+      }
+    }
+
+    /* 8. Client nào gửi dữ liệu thì echo lại cho client đó */
+    for(int i = 0; i < MAX_CLIENTS; i++) {
+      if(clients[i] == -1) {
+        continue;
+      }
+
+      if(!FD_ISSET(clients[i], &read_fds)) {
+        continue;
+      }
+
+      char buffer[BUFFER_SIZE];
+      ssize_t bytes_received = recv(clients[i], buffer, sizeof(buffer), 0);
 
       if(bytes_received <= 0) {
-        break;
-      }
+        printf("Client %d disconnected!\n", clients[i]);
+        close(clients[i]);
+        clients[i] = -1;
+      } else {
+        ssize_t bytes_sent = send(clients[i], buffer, bytes_received, 0);
 
-      ssize_t bytes_sent = send(client_socket, buffer, bytes_received, 0);
-
-      if(bytes_sent < 0) {
-        perror("send");
-        break;
+        if(bytes_sent < 0) {
+          perror("send");
+          close(clients[i]);
+          clients[i] = -1;
+        }
       }
     }
+  }
 
-    printf("Client disconnected!\n");
-    close(client_socket);
+  for(int i = 0; i < MAX_CLIENTS; i++) {
+    if(clients[i] != -1) {
+      close(clients[i]);
+    }
   }
 
   close(listener);
 
-  return EXIT_SUCCESS;
+  return EXIT_FAILURE;
 }
