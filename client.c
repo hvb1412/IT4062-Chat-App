@@ -3,7 +3,6 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 
-/* 1. Thư viện chuẩn C và thư viện hệ thống POSIX. */
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -14,6 +13,7 @@
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
+
 
 #define LINE_MAX_BYTES 4096
 #define OUT_CAPACITY 16384
@@ -28,6 +28,7 @@ struct out_queue {
     char data[OUT_CAPACITY];
     size_t used;
 };
+
 
 typedef int (*line_callback)(const char *line, void *context);
 
@@ -47,6 +48,7 @@ static int print_line(const char *line, void *context);
 static int submit_input(char *line, struct client_state *state);
 static int submit_ping(struct client_state *state);
 static int submit_echo(const char *text, struct client_state *state);
+static int request_disconnect(struct client_state *state);
 int main(int argc, char **argv);
 
 int line_feed(struct line_reader *reader, const char *data, size_t length,
@@ -118,8 +120,10 @@ int flush_queue(int fd, struct out_queue *queue)
         ssize_t sent = send(fd, queue->data, queue->used, MSG_NOSIGNAL);
         if (sent > 0) {
             queue->used -= (size_t)sent;
+            /* Chỉ loại phần đã gửi thành công, giữ nguyên thứ tự các byte còn lại. */
             memmove(queue->data, queue->data + sent, queue->used);
         } else if (sent < 0 && errno == EINTR) {
+            /* Tín hiệu ngắt lời gọi hệ thống: thử gửi lại. */
             continue;
         } else if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
             return 0;
@@ -139,7 +143,7 @@ static int print_line(const char *line, void *context)
     return 0;
 }
 
-/* Lệnh kiểm tra kết nối chỉ xếp một frame; select sẽ gửi khi socket ghi được. */
+/* Xử lý lệnh cục bộ hoặc đổi lệnh nhập thành thông điệp gửi server. */
 static int submit_ping(struct client_state *state)
 {
     if (queue_line(&state->output, "PING") < 0) {
@@ -161,9 +165,21 @@ static int submit_echo(const char *text, struct client_state *state)
     return queue_line(&state->output, frame);
 }
 
+
+/* Chỉ dừng đọc bàn phím khi QUIT đã được xếp thành công; vẫn chờ phản hồi server. */
+static int request_disconnect(struct client_state *state)
+{
+    if (queue_line(&state->output, "QUIT") < 0)
+        return -1;
+    state->input_done = 1;
+    return 0;
+}
+
 static int submit_input(char *line, struct client_state *state)
 {
-    if (strcmp(line, "/ping") == 0)
+    if (strcmp(line, "/quit") == 0 || strcmp(line, "QUIT") == 0)
+        return request_disconnect(state);
+    else if (strcmp(line, "/ping") == 0)
         return submit_ping(state);
     if (strcmp(line, "/echo") == 0 || strncmp(line, "/echo ", 6) == 0)
         return submit_echo(line[5] == ' ' ? line + 6 : "", state);
@@ -173,10 +189,9 @@ static int submit_input(char *line, struct client_state *state)
         fprintf(stderr, "Input/output buffer limit reached\n");
         return -1;
     }
-    if (strcmp(line, "QUIT") == 0)
-        state->input_done = 1;
     return 0;
 }
+
 
 
 int main(int argc, char **argv)
