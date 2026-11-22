@@ -3,6 +3,7 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 
+/* 1. Thư viện chuẩn C và thư viện hệ thống POSIX. */
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -45,6 +46,7 @@ int flush_queue(int fd, struct out_queue *queue);
 static int print_line(const char *line, void *context);
 static int submit_input(char *line, struct client_state *state);
 static int submit_ping(struct client_state *state);
+static int submit_echo(const char *text, struct client_state *state);
 int main(int argc, char **argv);
 
 int line_feed(struct line_reader *reader, const char *data, size_t length,
@@ -52,6 +54,7 @@ int line_feed(struct line_reader *reader, const char *data, size_t length,
 {
     for (size_t i = 0; i < length; ++i) {
         unsigned char byte = (unsigned char)data[i];
+        /* Từ chối byte NUL và ký tự CR không được theo ngay sau bởi LF. */
         if (byte == 0 || (reader->used > 0 &&
             reader->data[reader->used - 1] == '\r' && byte != '\n'))
             return -1;
@@ -101,22 +104,22 @@ int parse_port(const char *text, unsigned short *port)
     return 0;
 }
 
+/* Giữ các cờ hiện tại và thêm O_NONBLOCK để socket không chờ dữ liệu vô hạn. */
 int set_nonblocking(int fd)
 {
     int flags = fcntl(fd, F_GETFL, 0);
     return flags < 0 ? -1 : fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
+/* Lặp gửi dữ liệu; khi gửi thiếu thì dồn phần chưa gửi về đầu hàng đợi. */
 int flush_queue(int fd, struct out_queue *queue)
 {
     while (queue->used > 0) {
         ssize_t sent = send(fd, queue->data, queue->used, MSG_NOSIGNAL);
         if (sent > 0) {
             queue->used -= (size_t)sent;
-            /* Chỉ loại phần đã gửi thành công, giữ nguyên thứ tự các byte còn lại. */
             memmove(queue->data, queue->data + sent, queue->used);
         } else if (sent < 0 && errno == EINTR) {
-            /* Tín hiệu ngắt lời gọi hệ thống: thử gửi lại. */
             continue;
         } else if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
             return 0;
@@ -127,6 +130,7 @@ int flush_queue(int fd, struct out_queue *queue)
     return 0;
 }
 
+/* Xử lý một dòng hoàn chỉnh từ server và in ngay ra terminal. */
 static int print_line(const char *line, void *context)
 {
     (void)context;
@@ -135,6 +139,7 @@ static int print_line(const char *line, void *context)
     return 0;
 }
 
+/* Lệnh kiểm tra kết nối chỉ xếp một frame; select sẽ gửi khi socket ghi được. */
 static int submit_ping(struct client_state *state)
 {
     if (queue_line(&state->output, "PING") < 0) {
@@ -144,10 +149,24 @@ static int submit_ping(struct client_state *state)
     return 0;
 }
 
+/* Kiểm tra nội dung và độ dài trước khi dựng frame ECHO. */
+static int submit_echo(const char *text, struct client_state *state)
+{
+    char frame[LINE_MAX_BYTES + 1];
+    if (*text == '\0' || strlen(text) > LINE_MAX_BYTES - 5) {
+        fprintf(stderr, "Dung: /echo <noi dung>, toi da %d byte\n", LINE_MAX_BYTES - 5);
+        return 0; /* Lỗi nhập: người dùng có thể thử lại. */
+    }
+    snprintf(frame, sizeof(frame), "ECHO %s", text);
+    return queue_line(&state->output, frame);
+}
+
 static int submit_input(char *line, struct client_state *state)
 {
     if (strcmp(line, "/ping") == 0)
         return submit_ping(state);
+    if (strcmp(line, "/echo") == 0 || strncmp(line, "/echo ", 6) == 0)
+        return submit_echo(line[5] == ' ' ? line + 6 : "", state);
     if (*line == '\0')
         return 0;
     if (queue_line(&state->output, line) < 0) {
@@ -158,6 +177,7 @@ static int submit_input(char *line, struct client_state *state)
         state->input_done = 1;
     return 0;
 }
+
 
 int main(int argc, char **argv)
 {
@@ -227,7 +247,6 @@ int main(int argc, char **argv)
                 break;
             }
         }
-        /* Dùng read() để tránh bộ đệm riêng của fgets() giữ dữ liệu mà select() không nhìn thấy. */
         if (!state.input_done && FD_ISSET(STDIN_FILENO, &reads)) {
             char buffer[1024];
             ssize_t count = read(STDIN_FILENO, buffer, sizeof(buffer));
