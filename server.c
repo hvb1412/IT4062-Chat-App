@@ -11,6 +11,19 @@
 #define PORT 8080
 #define MAX_CLIENTS 64
 #define BUFFER_SIZE 1024
+#define LINE_MAX_BYTES 4096
+#define OUT_CAPACITY 16384
+
+struct line_reader {
+  char data[LINE_MAX_BYTES + 1];
+  size_t used;
+  int saw_cr;
+};
+
+struct out_queue {
+  char data[OUT_CAPACITY];
+  size_t used;
+};
 
 static volatile sig_atomic_t stop_requested = 0;
 static void handle_stop(int signal_number) {
@@ -41,6 +54,53 @@ static int send_all(int fd, const char *buffer, size_t length) {
   }
 
   return total_sent == length ? 0 : -1;
+}
+
+int read_line_byte(struct line_reader *reader, char byte) {
+  if (reader->saw_cr) {
+    if (byte != '\n') {
+      return -1;
+    }
+
+    reader->data[reader->used] = '\0';
+    reader->used = 0;
+    reader->saw_cr = 0;
+    return 1;
+  }
+
+  if (byte == '\r') {
+    reader->saw_cr = 1;
+    return 0;
+  }
+
+  if (byte == '\n' || byte == '\0' || reader->used >= LINE_MAX_BYTES) {
+    return -1;
+  }
+
+  reader->data[reader->used] = byte;
+  reader->used++;
+  return 0;
+}
+
+int queue_line(struct out_queue *queue, const char *line) {
+  size_t length = strlen(line);
+
+  if (length > LINE_MAX_BYTES ||
+      strchr(line, '\r') != NULL ||
+      strchr(line, '\n') != NULL) {
+    return -1;
+  }
+
+  size_t frame_size = length + 2;
+  if (frame_size > OUT_CAPACITY - queue->used) {
+    return -1;
+  }
+
+  memcpy(queue->data + queue->used, line, length);
+  queue->data[queue->used + length] = '\r';
+  queue->data[queue->used + length + 1] = '\n';
+  queue->used += frame_size;
+  return 0;
 }
 
 int main() {
@@ -195,5 +255,5 @@ int main() {
 
   close(listener);
 
-  return EXIT_FAILURE;
+  return exit_status;
 }
