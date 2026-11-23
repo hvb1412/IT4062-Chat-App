@@ -28,7 +28,7 @@ struct out_queue {
 
 struct client {
   int fd;
-  int read_closed;
+  int read_closed; /* Dừng đọc sau EOF hoặc QUIT. */
   struct line_reader input;
   struct out_queue output;
 };
@@ -148,6 +148,14 @@ static int read_client(struct client *client) {
     }
     if (result == 1) {
       const char *line = client->input.data;
+      if (strcmp(line, "QUIT") == 0) {
+        if (queue_line(&client->output, "100 BYE") < 0) {
+          return -1;
+        }
+        client->read_closed = 1;
+        return 0; /* Dừng xử lý các lệnh sau QUIT trong lần đọc này. */
+      }
+
       const char *response = "400 UNKNOWN COMMAND";
       if (strcmp(line, "PING") == 0) {
         response = "100 PONG";
