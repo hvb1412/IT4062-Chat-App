@@ -147,9 +147,12 @@ static int read_client(struct client *client) {
       return -1;
     }
     if (result == 1) {
+      const char *line = client->input.data;
       const char *response = "400 UNKNOWN COMMAND";
-      if (strcmp(client->input.data, "PING") == 0) {
+      if (strcmp(line, "PING") == 0) {
         response = "100 PONG";
+      } else if (strncmp(line, "ECHO ", 5) == 0) {
+        response = line + 5;
       }
       if (queue_line(&client->output, response) < 0) {
         return -1;
