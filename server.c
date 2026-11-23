@@ -26,35 +26,17 @@ struct out_queue {
   size_t used;
 };
 
+struct client {
+  int fd;
+  int read_closed;
+  struct line_reader input;
+  struct out_queue output;
+};
+
 static volatile sig_atomic_t stop_requested = 0;
 static void handle_stop(int signal_number) {
   (void)signal_number;
   stop_requested = 1;
-}
-
-static int send_all(int fd, const char *buffer, size_t length) {
-  size_t total_sent = 0;
-
-  while(total_sent < length && !stop_requested) {
-    ssize_t sent = send(fd, buffer + total_sent, length - total_sent, MSG_NOSIGNAL);
-
-    if(sent < 0) {
-      if(errno == EINTR) {
-        continue;
-      }
-
-      perror("send");
-      return -1;
-    }
-
-    if(sent == 0) {
-      return -1;
-    }
-
-    total_sent += (size_t)sent;
-  }
-
-  return total_sent == length ? 0 : -1;
 }
 
 int read_line_byte(struct line_reader *reader, char byte) {
@@ -137,7 +119,54 @@ int flush_queue(int fd, struct out_queue *queue) {
   return 0;
 }
 
-int main() {
+static int read_client(struct client *client) {
+  char buffer[BUFFER_SIZE];
+  ssize_t received = recv(client->fd, buffer, sizeof(buffer), 0);
+
+  if (received < 0) {
+    if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
+      return 0;
+    }
+    perror("recv");
+    return -1;
+  }
+
+  if (received == 0) {
+    if (client->input.used > 0 || client->input.saw_cr) {
+      return -1;
+    }
+    /* Client đóng chiều gửi, server vẫn gửi nốt phản hồi đang chờ. */
+    client->read_closed = 1;
+    return 0;
+  }
+
+  /* Mỗi socket giữ riêng phần dòng còn dang dở giữa các lần recv(). */
+  for (ssize_t i = 0; i < received; i++) {
+    int result = read_line_byte(&client->input, buffer[i]);
+    if (result < 0) {
+      return -1;
+    }
+    if (result == 1) {
+      const char *response = "400 UNKNOWN COMMAND";
+      if (strcmp(client->input.data, "PING") == 0) {
+        response = "100 PONG";
+      }
+      if (queue_line(&client->output, response) < 0) {
+        return -1;
+      }
+    }
+  }
+
+  return 0;
+}
+
+static void close_client(struct client *client) {
+  printf("Client %d disconnected!\n", client->fd);
+  close(client->fd);
+  client->fd = -1;
+}
+
+int main(void) {
   if(signal(SIGINT, handle_stop) == SIG_ERR || signal(SIGTERM, handle_stop) == SIG_ERR) {
     perror("signal");
     return EXIT_FAILURE;
@@ -151,6 +180,17 @@ int main() {
     return EXIT_FAILURE;
   }
 
+  if (listener >= FD_SETSIZE) {
+    fprintf(stderr, "Listener fd exceeds select() limit\n");
+    close(listener);
+    return EXIT_FAILURE;
+  }
+  if (set_nonblocking(listener) < 0) {
+    perror("set_nonblocking listener");
+    close(listener);
+    return EXIT_FAILURE;
+  }
+
   /* Cho phép bind lại cổng ngay khi vừa tắt server */
   int reuse = 1;
   setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
@@ -160,7 +200,7 @@ int main() {
   memset(&server_addr, 0, sizeof(server_addr));
 
   server_addr.sin_family = AF_INET;
-  server_addr.sin_port = htons(8080);
+  server_addr.sin_port = htons(PORT);
   server_addr.sin_addr.s_addr = INADDR_ANY;
 
   if(bind(listener, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
@@ -176,34 +216,42 @@ int main() {
     return EXIT_FAILURE;
   }
 
-  printf("Server is listening on port 8080...\n");
+  printf("Server is listening on port %d...\n", PORT);
 
   /* 4. Mảng lưu các client đang kết nối, -1 là trống */
-  int clients[MAX_CLIENTS];
+  static struct client clients[MAX_CLIENTS];
   for(int i = 0; i < MAX_CLIENTS; i++) {
-    clients[i] = -1;
+    clients[i].fd = -1;
   }
 
   int exit_status = EXIT_SUCCESS;
 
   while(!stop_requested) {
-    /* 5. Dựng lại tập socket cần theo dõi ở mỗi vòng lặp */
-    fd_set read_fds;
+    /* 5. Theo dõi đọc và chỉ theo dõi ghi khi còn dữ liệu chờ. */
+    fd_set read_fds, write_fds;
     FD_ZERO(&read_fds);
+    FD_ZERO(&write_fds);
     FD_SET(listener, &read_fds);
     int max_fd = listener;
 
-    for(int i = 0; i < MAX_CLIENTS; i++) {
-      if(clients[i] != -1) {
-        FD_SET(clients[i], &read_fds);
-        if(clients[i] > max_fd) {
-          max_fd = clients[i];
-        }
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+      struct client *client = &clients[i];
+      if (client->fd < 0) {
+        continue;
+      }
+      if (!client->read_closed) {
+        FD_SET(client->fd, &read_fds);
+      }
+      if (client->output.used > 0) {
+        FD_SET(client->fd, &write_fds);
+      }
+      if (client->fd > max_fd) {
+        max_fd = client->fd;
       }
     }
 
     struct timeval timeout = {1, 0};
-    int activity = select(max_fd + 1, &read_fds, NULL, NULL, &timeout);
+    int activity = select(max_fd + 1, &read_fds, &write_fds, NULL, &timeout);
 
     if(activity < 0) {
       if(errno == EINTR) {
@@ -223,67 +271,69 @@ int main() {
       continue;
     }
 
-    /* 7. Có client mới kết nối */
-    if(FD_ISSET(listener, &read_fds)) {
-      int client_socket = accept(listener, NULL, NULL);
+    /* 7. Gửi phản hồi đang chờ rồi đọc dữ liệu mới nếu socket sẵn sàng. */
+    for (int i = 0; i < MAX_CLIENTS && !stop_requested; i++) {
+      struct client *client = &clients[i];
+      if (client->fd < 0) {
+        continue;
+      }
 
-      if(client_socket < 0) {
-        perror("accept");
-      } else {
-        int slot = -1;
-        for(int i = 0; i < MAX_CLIENTS; i++) {
-          if(clients[i] == -1) {
-            slot = i;
-            break;
-          }
-        }
+      if (FD_ISSET(client->fd, &write_fds) &&
+          flush_queue(client->fd, &client->output) < 0) {
+        close_client(client);
+        continue;
+      }
 
-        if(slot == -1) {
-          printf("Server is full, reject client %d\n", client_socket);
-          close(client_socket);
-        } else {
-          clients[slot] = client_socket;
-          printf("Client %d connected!\n", client_socket);
-        }
+      if (FD_ISSET(client->fd, &read_fds) && read_client(client) < 0) {
+        close_client(client);
+        continue;
+      }
+
+      if (client->read_closed && client->output.used == 0) {
+        close_client(client);
       }
     }
 
-    /* 8. Client nào gửi dữ liệu thì echo lại cho client đó */
-    for(int i = 0; i < MAX_CLIENTS; i++) {
-      if(clients[i] == -1) {
+    /* 8. Đưa kết nối mới vào vòng select() kế tiếp. */
+    if (!stop_requested && FD_ISSET(listener, &read_fds)) {
+      int client_socket = accept(listener, NULL, NULL);
+      if (client_socket < 0) {
+        if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) {
+          perror("accept");
+        }
+        continue;
+      }
+      if (client_socket >= FD_SETSIZE) {
+        fprintf(stderr, "Client fd exceeds select() limit\n");
+        close(client_socket);
         continue;
       }
 
-      if(!FD_ISSET(clients[i], &read_fds)) {
-        continue;
+      int slot = -1;
+      for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (clients[i].fd == -1) {
+          slot = i;
+          break;
+        }
       }
 
-      int fd = clients[i];
-      char buffer[BUFFER_SIZE];
-      ssize_t received = recv(fd, buffer, sizeof(buffer), 0);
-
-      if(received < 0 && errno == EINTR) {
-        continue;
+      if (slot == -1) {
+        printf("Server is full, reject client %d\n", client_socket);
+        close(client_socket);
+      } else if (set_nonblocking(client_socket) < 0) {
+        perror("set_nonblocking client");
+        close(client_socket);
+      } else {
+        memset(&clients[slot], 0, sizeof(clients[slot]));
+        clients[slot].fd = client_socket;
+        printf("Client %d connected!\n", client_socket);
       }
-
-      if(received > 0 && send_all(fd, buffer, (size_t)received) == 0) {
-        continue;
-      }
-
-      if(received == 0) {
-        printf("Clients %d disconnected!\n", fd);
-      } else if (received < 0) {
-        perror("recv");
-      }
-
-      close(fd);
-      clients[i] = -1;
     }
   }
 
   for(int i = 0; i < MAX_CLIENTS; i++) {
-    if(clients[i] != -1) {
-      close(clients[i]);
+    if(clients[i].fd != -1) {
+      close(clients[i].fd);
     }
   }
 
