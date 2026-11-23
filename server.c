@@ -7,6 +7,7 @@
 #include <sys/socket.h>
 #include <sys/select.h>
 #include <netinet/in.h>
+#include <fcntl.h>
 
 #define PORT 8080
 #define MAX_CLIENTS 64
@@ -100,6 +101,39 @@ int queue_line(struct out_queue *queue, const char *line) {
   queue->data[queue->used + length] = '\r';
   queue->data[queue->used + length + 1] = '\n';
   queue->used += frame_size;
+  return 0;
+}
+
+int set_nonblocking(int fd) {
+  int flags = fcntl(fd, F_GETFL, 0);
+  if (flags < 0) {
+    return -1;
+  }
+
+  return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+int flush_queue(int fd, struct out_queue *queue) {
+  while (queue->used > 0) {
+    ssize_t sent = send(fd, queue->data, queue->used, MSG_NOSIGNAL);
+
+    if (sent > 0) {
+      queue->used -= (size_t)sent;
+      memmove(queue->data, queue->data + sent, queue->used);
+      continue;
+    }
+
+    if (sent < 0 && errno == EINTR) {
+      continue;
+    }
+
+    if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+      return 0;
+    }
+
+    return -1;
+  }
+
   return 0;
 }
 
