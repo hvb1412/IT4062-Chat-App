@@ -212,6 +212,26 @@ static int send_private_message(struct client *sender, char *args) {
   return 0;
 }
 
+static void leave_chat(struct client *client) {
+  client->read_closed = 1;
+  if (client->nickname[0] == '\0') {
+    return;
+  }
+
+  char event[sizeof("EVENT LEFT ") + NICKNAME_MAX];
+  snprintf(event, sizeof(event), "EVENT LEFT %s", client->nickname);
+  /* Giải phóng nickname khi rời chat để chỉ phát thông báo một lần. */
+  client->nickname[0] = '\0';
+
+  for (int i = 0; i < MAX_CLIENTS; i++) {
+    struct client *peer = &clients[i];
+    if (peer->fd < 0 || peer->read_closed || peer->nickname[0] == '\0') {
+      continue;
+    }
+    (void)queue_line(&peer->output, event);
+  }
+}
+
 static int read_client(struct client *client) {
   char buffer[BUFFER_SIZE];
   ssize_t received = recv(client->fd, buffer, sizeof(buffer), 0);
@@ -229,7 +249,7 @@ static int read_client(struct client *client) {
       return -1;
     }
     /* Client đóng chiều gửi, server vẫn gửi nốt phản hồi đang chờ. */
-    client->read_closed = 1;
+    leave_chat(client);
     return 0;
   }
 
@@ -245,7 +265,7 @@ static int read_client(struct client *client) {
         if (queue_line(&client->output, "100 BYE") < 0) {
           return -1;
         }
-        client->read_closed = 1;
+        leave_chat(client);
         return 0; /* Dừng xử lý các lệnh sau QUIT trong lần đọc này. */
       }
 
@@ -288,6 +308,7 @@ static int read_client(struct client *client) {
 }
 
 static void close_client(struct client *client) {
+  leave_chat(client);
   printf("Client %d disconnected!\n", client->fd);
   close(client->fd);
   client->fd = -1;
