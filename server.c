@@ -157,6 +157,24 @@ static int join_client(struct client *client, const char *name) {
   return 0;
 }
 
+static int list_joined_clients(struct client *requester) {
+  char response[sizeof("ITEM USER ") + NICKNAME_MAX];
+
+  for (int i = 0; i < MAX_CLIENTS; i++) {
+    struct client *peer = &clients[i];
+    if (peer->fd < 0 || peer->read_closed || peer->nickname[0] == '\0') {
+      continue;
+    }
+
+    snprintf(response, sizeof(response), "ITEM USER %s", peer->nickname);
+    if (queue_line(&requester->output, response) < 0) {
+      return -1;
+    }
+  }
+
+  return queue_line(&requester->output, "100 END");
+}
+
 static int read_client(struct client *client) {
   char buffer[BUFFER_SIZE];
   ssize_t received = recv(client->fd, buffer, sizeof(buffer), 0);
@@ -210,6 +228,11 @@ static int read_client(struct client *client) {
         response = "400 INVALID NICKNAME";
       } else if (*line != '\0' && client->nickname[0] == '\0') {
         response = "401 JOIN REQUIRED";
+      } else if (strcmp(line, "WHO") == 0) {
+        if (list_joined_clients(client) < 0) {
+          return -1;
+        }
+        continue;
       }
       if (queue_line(&client->output, response) < 0) {
         return -1;
