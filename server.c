@@ -15,6 +15,7 @@
 #define LINE_MAX_BYTES 4096
 #define OUT_CAPACITY 16384
 #define NICKNAME_MAX 24
+#define MESSAGE_MAX 1000
 
 struct line_reader {
   char data[LINE_MAX_BYTES + 1];
@@ -122,6 +123,19 @@ int flush_queue(int fd, struct out_queue *queue) {
   return 0;
 }
 
+static struct client *find_client_by_name(const char *name) {
+  for (int i = 0; i < MAX_CLIENTS; i++) {
+    if (clients[i].fd < 0 || clients[i].read_closed) {
+      continue;
+    }
+    if (strcmp(clients[i].nickname, name) == 0) {
+      return &clients[i];
+    }
+  }
+
+  return NULL;
+}
+
 static int join_client(struct client *client, const char *name) {
   size_t length = strlen(name);
   if (length < 3 || length > NICKNAME_MAX) {
@@ -135,18 +149,8 @@ static int join_client(struct client *client, const char *name) {
     }
   }
 
-  if (client->nickname[0] != '\0') {
+  if (client->nickname[0] != '\0' || find_client_by_name(name) != NULL) {
     return queue_line(&client->output, "409 NAME IN USE");
-  }
-
-  /* Chỉ kiểm tra nickname trên các kết nối đang hoạt động. */
-  for (int i = 0; i < MAX_CLIENTS; i++) {
-    if (clients[i].fd < 0 || clients[i].read_closed) {
-      continue;
-    }
-    if (strcmp(clients[i].nickname, name) == 0) {
-      return queue_line(&client->output, "409 NAME IN USE");
-    }
   }
 
   if (queue_line(&client->output, "100 JOINED") < 0) {
@@ -173,6 +177,39 @@ static int list_joined_clients(struct client *requester) {
   }
 
   return queue_line(&requester->output, "100 END");
+}
+
+static int send_private_message(struct client *sender, char *args) {
+  /* Dấu cách đầu tiên tách nickname đích khỏi phần nội dung. */
+  char *message = strchr(args, ' ');
+  if (message == NULL || message == args) {
+    return queue_line(&sender->output, "400 SYNTAX");
+  }
+  *message = '\0';
+  message++;
+
+  size_t length = strlen(message);
+  if (length == 0 || length > MESSAGE_MAX) {
+    return queue_line(&sender->output, "400 MESSAGE LENGTH");
+  }
+
+  struct client *recipient = find_client_by_name(args);
+  if (recipient == NULL) {
+    return queue_line(&sender->output, "404 NO USER");
+  }
+
+  char event[LINE_MAX_BYTES + 1];
+  snprintf(event, sizeof(event), "EVENT PMSG %s %s", sender->nickname, message);
+  size_t previous_size = recipient->output.used;
+  if (queue_line(&recipient->output, event) < 0) {
+    return queue_line(&sender->output, "503 RECIPIENT TOO SLOW");
+  }
+  if (queue_line(&sender->output, "100 SENT") < 0) {
+    /* Bỏ tin vừa xếp nếu hàng đợi người gửi đã hết chỗ cho phản hồi. */
+    recipient->output.used = previous_size;
+    return -1;
+  }
+  return 0;
 }
 
 static int read_client(struct client *client) {
@@ -233,6 +270,13 @@ static int read_client(struct client *client) {
           return -1;
         }
         continue;
+      } else if (strncmp(line, "PMSG ", 5) == 0) {
+        if (send_private_message(client, client->input.data + 5) < 0) {
+          return -1;
+        }
+        continue;
+      } else if (strcmp(line, "PMSG") == 0) {
+        response = "400 SYNTAX";
       }
       if (queue_line(&client->output, response) < 0) {
         return -1;
