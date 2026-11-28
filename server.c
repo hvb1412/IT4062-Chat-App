@@ -14,6 +14,7 @@
 #define BUFFER_SIZE 1024
 #define LINE_MAX_BYTES 4096
 #define OUT_CAPACITY 16384
+#define NICKNAME_MAX 24
 
 struct line_reader {
   char data[LINE_MAX_BYTES + 1];
@@ -29,6 +30,7 @@ struct out_queue {
 struct client {
   int fd;
   int read_closed; /* Dừng đọc sau EOF hoặc QUIT. */
+  char nickname[NICKNAME_MAX + 1];
   struct line_reader input;
   struct out_queue output;
 };
@@ -119,6 +121,30 @@ int flush_queue(int fd, struct out_queue *queue) {
   return 0;
 }
 
+static int join_client(struct client *client, const char *name) {
+  size_t length = strlen(name);
+  if (length < 3 || length > NICKNAME_MAX) {
+    return queue_line(&client->output, "400 INVALID NICKNAME");
+  }
+
+  for (size_t i = 0; i < length; i++) {
+    char ch = name[i];
+    if (!((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_')) {
+      return queue_line(&client->output, "400 INVALID NICKNAME");
+    }
+  }
+
+  if (client->nickname[0] != '\0') {
+    return queue_line(&client->output, "409 NAME IN USE");
+  }
+  if (queue_line(&client->output, "100 JOINED") < 0) {
+    return -1;
+  }
+
+  memcpy(client->nickname, name, length + 1);
+  return 0;
+}
+
 static int read_client(struct client *client) {
   char buffer[BUFFER_SIZE];
   ssize_t received = recv(client->fd, buffer, sizeof(buffer), 0);
@@ -156,11 +182,22 @@ static int read_client(struct client *client) {
         return 0; /* Dừng xử lý các lệnh sau QUIT trong lần đọc này. */
       }
 
+      if (strncmp(line, "JOIN ", 5) == 0) {
+        if (join_client(client, line + 5) < 0) {
+          return -1;
+        }
+        continue;
+      }
+
       const char *response = "400 UNKNOWN COMMAND";
       if (strcmp(line, "PING") == 0) {
         response = "100 PONG";
       } else if (strncmp(line, "ECHO ", 5) == 0) {
         response = line + 5;
+      } else if (strcmp(line, "JOIN") == 0) {
+        response = "400 INVALID NICKNAME";
+      } else if (*line != '\0' && client->nickname[0] == '\0') {
+        response = "401 JOIN REQUIRED";
       }
       if (queue_line(&client->output, response) < 0) {
         return -1;
