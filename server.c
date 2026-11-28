@@ -35,6 +35,7 @@ struct client {
   struct out_queue output;
 };
 
+static struct client clients[MAX_CLIENTS];
 static volatile sig_atomic_t stop_requested = 0;
 static void handle_stop(int signal_number) {
   (void)signal_number;
@@ -137,6 +138,17 @@ static int join_client(struct client *client, const char *name) {
   if (client->nickname[0] != '\0') {
     return queue_line(&client->output, "409 NAME IN USE");
   }
+
+  /* Chỉ kiểm tra nickname trên các kết nối đang hoạt động. */
+  for (int i = 0; i < MAX_CLIENTS; i++) {
+    if (clients[i].fd < 0 || clients[i].read_closed) {
+      continue;
+    }
+    if (strcmp(clients[i].nickname, name) == 0) {
+      return queue_line(&client->output, "409 NAME IN USE");
+    }
+  }
+
   if (queue_line(&client->output, "100 JOINED") < 0) {
     return -1;
   }
@@ -266,8 +278,7 @@ int main(void) {
 
   printf("Server is listening on port %d...\n", PORT);
 
-  /* 4. Mảng lưu các client đang kết nối, -1 là trống */
-  static struct client clients[MAX_CLIENTS];
+  /* 4. Đánh dấu các ô client đang trống. */
   for(int i = 0; i < MAX_CLIENTS; i++) {
     clients[i].fd = -1;
   }
